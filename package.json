@@ -1,0 +1,60 @@
+{
+  "name": "@tunghtml/strapi-plugin-export-import-clsx",
+  "version": "1.0.0",
+  "description": "A powerful Strapi plugin for exporting and importing data with Excel support and advanced filtering",
+  "main": "./strapi-server.js",
+  "scripts": {
+    "develop": "strapi plugin:watch",
+    "build": "strapi plugin:build"
+  },
+  "keywords": [
+    "strapi",
+    "plugin",
+    "export",
+    "import",
+    "excel",
+    "xlsx",
+    "data",
+    "migration",
+    "bulk",
+    "filter",
+    "strapi-plugin"
+  ],
+  "author": {
+    "name": "finnwasabi",
+    "email": "finnwasabi@example.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/finnwasabi/strapi-plugin-export-import-clsx.git"
+  },
+  "homepage": "https://github.com/finnwasabi/strapi-plugin-export-import-clsx#readme",
+  "bugs": {
+    "url": "https://github.com/finnwasabi/strapi-plugin-export-import-clsx/issues"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=7.0.0"
+  },
+  "peerDependencies": {
+    "@strapi/strapi": "^4.0.0 || ^5.0.0"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  },
+  "files": [
+    "admin/",
+    "server/",
+    "strapi-admin.js",
+    "strapi-server.js",
+    "README.md"
+  ],
+  "strapi": {
+    "name": "export-import-clsx",
+    "displayName": "Export Import CLSX",
+    "description": "Export and import data with enhanced functionality including Excel support and advanced filtering",
+    "kind": "plugin",
+    "category": "data-management"
+  }
+}
