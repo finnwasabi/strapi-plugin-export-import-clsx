@@ -4,7 +4,8 @@ const SPECIAL_KEYS = ['id', 'documentId', 'locale', 'createdAt', 'updatedAt', 'p
 const CORPORATE_COMPONENTS = ['interalInfo'];
 const INVESTOR_COMPONENTS = ['internalInfo'];
 
-async function importData() {
+async function importData(file, targetContentType) {
+  let result;
   try {
     let importData;
     // Check file extension
@@ -143,10 +144,9 @@ async function bulkInsertData(importData) {
     }
 
     for (const entry of entries) {
+      let existing = null;
       try {
         const { documentId, ...data } = entry; // keep id out, keep everything else
-
-        let existing = null;
 
         if (documentId && documentId !== 'null' && documentId !== 'undefined') {
           existing = await strapi.documents(contentType).findOne({ documentId });
