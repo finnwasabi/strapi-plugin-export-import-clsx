@@ -22,13 +22,13 @@ module.exports = ({ strapi }) => ({
       try {
         // Parse filters from URL format
         const parsedFilters = this.parseFilters(filters);
-        
+
         strapi.log.info(`Exporting ${ct} with raw filters:`, filters);
         strapi.log.info(`Parsed filters:`, parsedFilters);
         strapi.log.info(`Selected IDs:`, selectedIds);
 
         let entries = [];
-        
+
         // If specific IDs are selected, export only those
         if (selectedIds && selectedIds.length > 0) {
           try {
@@ -74,22 +74,18 @@ module.exports = ({ strapi }) => ({
                 populate: '*',
                 // Don't specify status to get all
               });
-              
               // Group by documentId and keep only the best version (published > modified draft > draft)
               const uniqueEntries = new Map();
-              
               for (const entry of allEntries) {
                 const docId = entry.documentId;
                 const isPublished = !!entry.publishedAt;
                 const isModified = entry.updatedAt !== entry.createdAt;
-                
                 if (!uniqueEntries.has(docId)) {
                   uniqueEntries.set(docId, entry);
                 } else {
                   const existing = uniqueEntries.get(docId);
                   const existingIsPublished = !!existing.publishedAt;
                   const existingIsModified = existing.updatedAt !== existing.createdAt;
-                  
                   // Priority: published > modified draft > draft
                   if (isPublished && !existingIsPublished) {
                     uniqueEntries.set(docId, entry);
@@ -98,10 +94,10 @@ module.exports = ({ strapi }) => ({
                   }
                 }
               }
-              
+
               entries = Array.from(uniqueEntries.values());
               strapi.log.info(`Found ${allEntries.length} total entries, ${entries.length} unique entries after deduplication`);
-              
+
               // Apply filters
               if (parsedFilters && Object.keys(parsedFilters).length > 0) {
                 strapi.log.info('Applying filters:', parsedFilters);
@@ -120,9 +116,9 @@ module.exports = ({ strapi }) => ({
             strapi.log.error(`Failed to query entries:`, error);
           }
         }
-        
+
         strapi.log.info(`Final result: ${entries?.length || 0} entries for ${ct} (total found: ${entries?.length || 0})`);
-        
+
         if (entries && entries.length > 0) {
           exportData.data[ct] = entries;
         }
@@ -130,8 +126,9 @@ module.exports = ({ strapi }) => ({
         strapi.log.error(`Failed to export ${ct}:`, error);
       }
     }
-
+    
     if (format === 'excel') {
+      console.log(exportData.data)
       return this.convertToExcel(exportData.data);
     }
 
@@ -140,27 +137,26 @@ module.exports = ({ strapi }) => ({
 
   parseFilters(filters) {
     const parsed = {};
-    
     for (const [key, value] of Object.entries(filters)) {
       // Skip pagination and sorting params
       if (['page', 'pageSize', 'sort', 'locale', 'format', 'contentType', 'selectedIds'].includes(key)) {
         continue;
       }
-      
+
       // Handle URL encoded filter format like filters[$and][0][shortName][$contains]
       if (key.startsWith('filters[')) {
         // Extract the actual filter structure
         const match = key.match(/filters\[([^\]]+)\](?:\[(\d+)\])?\[([^\]]+)\](?:\[([^\]]+)\])?/);
         if (match) {
           const [, operator, index, field, condition] = match;
-          
+
           if (!parsed.filters) parsed.filters = {};
-          
+
           if (operator === '$and') {
             if (!parsed.filters.$and) parsed.filters.$and = [];
             const idx = parseInt(index) || 0;
             if (!parsed.filters.$and[idx]) parsed.filters.$and[idx] = {};
-            
+
             if (condition) {
               if (!parsed.filters.$and[idx][field]) parsed.filters.$and[idx][field] = {};
               parsed.filters.$and[idx][field][condition] = value;
@@ -173,7 +169,7 @@ module.exports = ({ strapi }) => ({
         parsed[key] = value;
       }
     }
-    
+
     return parsed;
   },
 
@@ -192,7 +188,6 @@ module.exports = ({ strapi }) => ({
               if (entry[field]) {
                 const fieldValue = String(entry[field]).toLowerCase();
                 const searchValue = String(criteria.$contains).toLowerCase();
-                
                 if (!fieldValue.includes(searchValue)) {
                   return false;
                 }
@@ -208,30 +203,26 @@ module.exports = ({ strapi }) => ({
           }
         }
       }
-      
       // Handle other filter formats
       for (const [key, value] of Object.entries(filters)) {
         if (key === 'filters') continue; // Already handled above
-        
+
         // Handle simple search (global search)
         if (key === '_q' || key === 'search') {
           // Global search across main fields
           const searchFields = ['shortName', 'name', 'title'];
           const searchValue = String(value).toLowerCase();
-          
           const found = searchFields.some(field => {
             if (entry[field]) {
               return String(entry[field]).toLowerCase().includes(searchValue);
             }
             return false;
           });
-          
           if (!found) {
             return false;
           }
         }
       }
-      
       return true;
     });
 
@@ -245,53 +236,94 @@ module.exports = ({ strapi }) => ({
     for (const [contentType, entries] of Object.entries(data)) {
       // Clean sheet name (Excel has restrictions)
       const sheetName = contentType.replace(/[^\w\s]/gi, '_').substring(0, 31);
-      
       if (entries && entries.length > 0) {
         hasData = true;
-        
+
+        const attr = strapi.contentTypes[contentType].attributes;
+        const customFields = Object.entries(attr)
+          .filter(([key, definition]) => definition.customField)
+          .map(([key, definition]) => key);
+
         // Clean and flatten entries for Excel
         const cleanedEntries = entries.map(entry => {
-          // Keep important system fields for import
-          const { 
-            createdBy, 
-            updatedBy, 
-            localizations,
-            ...entryWithSystemFields 
-          } = entry;
+          const SYSTEM_KEYS = [
+            'documentId', 
+            'locale', 
+            'createdAt', 
+            'updatedAt', 
+            'publishedAt', 
+            'createdBy', 
+            'updatedBy', 
+            'localizations', 
+            'status'
+          ];
 
-          const flattened = {
-            // Always include these at the beginning for import reference
-            id: entry.id,
-            documentId: entry.documentId,
-            locale: entry.locale || 'en',
-          };
-          
-          const flatten = (obj, prefix = '') => {
-            for (const key in obj) {
-              // Skip already processed system fields and status fields
-              if (['id', 'documentId', 'createdBy', 'updatedBy', 'localizations', 'publishedAt', 'status'].includes(key)) {
-                continue;
-              }
-              
-              if (obj[key] !== null && typeof obj[key] === 'object' && !Array.isArray(obj[key])) {
-                // Skip nested objects that are system fields
-                if (key === 'createdBy' || key === 'updatedBy') {
+          function cleanAndFlatten(obj) {
+            if (Array.isArray(obj)) {
+              return obj.map(cleanAndFlatten);
+            } else if (obj !== null && typeof obj === 'object') {
+              const result = {};
+
+              for (const key in obj) {
+                const value = obj[key];
+
+                // Skip system keys
+                if (SYSTEM_KEYS.includes(key)) continue;
+                if (customFields.includes(key)) continue;
+
+                // Null or primitive
+                if (value === null || typeof value !== 'object') {
+                  result[key] = value;
                   continue;
                 }
-                flatten(obj[key], prefix + key + '_');
-              } else if (Array.isArray(obj[key])) {
-                flattened[prefix + key] = JSON.stringify(obj[key]);
-              } else {
-                flattened[prefix + key] = obj[key];
+
+                // Array handling
+                if (Array.isArray(value)) {
+                  // Array of objects
+                  if (value.length > 0 && typeof value[0] === 'object') {
+                    result[key] = value.map(cleanAndFlatten);
+                  } else {
+                    // Array of primitives
+                    result[key] = value;
+                  }
+                  continue;
+                }
+
+                // Component (no documentId)
+                if (!('documentId' in value)) {
+                  for (const subKey in value) {
+                    if (subKey === 'id') continue; // skip id
+                    result[`${key}_${subKey}`] = value[subKey];
+                  }
+                  continue; // skip keeping the original key
+                }
+                // Relation object (has documentId)
+                result[key] = cleanAndFlatten(value);
               }
+              return result;
+            } else {
+              return obj; // primitive
             }
-          };
-          
-          flatten(entryWithSystemFields);
-          return flattened;
+          }
+          // Example usage
+          const cleaned = cleanAndFlatten(entry);
+          return cleaned;
         });
 
-        const worksheet = XLSX.utils.json_to_sheet(cleanedEntries);
+        function flattenForXLSX(obj) {
+          const result = {};
+          for (const key in obj) {
+            const value = obj[key];
+            if (Array.isArray(value)) {
+              result[key] = JSON.stringify(value);
+            } else {
+              result[key] = value;
+            }
+          }
+          return result;
+        }
+        const cleanedFlat = cleanedEntries.map(entry => flattenForXLSX(entry));
+        const worksheet = XLSX.utils.json_to_sheet(cleanedFlat);
         XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
       } else {
         // Create empty sheet with headers if no data
