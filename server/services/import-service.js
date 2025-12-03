@@ -1,306 +1,186 @@
-const fs = require('fs');
 const XLSX = require('xlsx');
+const fs = require('fs');
+const SPECIAL_KEYS = ['id', 'documentId', 'locale', 'createdAt', 'updatedAt', 'publishedAt', 'createdBy', 'updatedBy', 'localizations'];
+const CORPORATE_COMPONENTS = ['interalInfo'];
+const INVESTOR_COMPONENTS = ['internalInfo'];
 
-module.exports = ({ strapi }) => ({
-  async importData(file, targetContentType = null) {
-    try {
-      let importData;
-      
-      // Check file extension
-      const fileName = file.name || file.originalFilename || 'unknown.json';
-      const fileExtension = fileName.split('.').pop().toLowerCase();
-      
-      const filePath = file.path || file.filepath;
-      
-      if (!filePath) {
-        throw new Error('File path not found');
-      }
+async function importData() {
+  try {
+    let importData;
+    // Check file extension
+    const fileName = file.name || file.originalFilename || 'unknown.json';
+    const fileExtension = fileName.split('.').pop().toLowerCase();
+    const filePath = file.path || file.filepath;
+    if (!filePath) {
+      throw new Error('File path not found');
+    }
 
-      if (fileExtension === 'json') {
-        const fileContent = fs.readFileSync(filePath, 'utf8');
-        importData = JSON.parse(fileContent);
-        strapi.log.info('Parsed JSON data:', Object.keys(importData));
-      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-        const workbook = XLSX.readFile(filePath);
-        importData = {};
-        
-        strapi.log.info('Excel sheet names:', workbook.SheetNames);
-        
-        // Convert each sheet to data
-        workbook.SheetNames.forEach(sheetName => {
-          const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet);
-          strapi.log.info(`Sheet ${sheetName} has ${jsonData.length} rows`);
-          if (jsonData.length > 0) {
-            // Map sheet name back to content type
-            let contentTypeName = sheetName;
-            if (sheetName.startsWith('api__')) {
-              // Convert api__corporate_corporate to api::corporate.corporate
-              contentTypeName = sheetName.replace(/^api__/, 'api::').replace(/_/g, '.');
-            }
-            
-            // Unflatten Excel data back to nested objects
-            const unflattened = jsonData.map((row, index) => {
-              const result = {};
-              
-              // Known component prefixes that should be unflattened
-              const componentPrefixes = ['corporateInfo', 'meetingRequirements', 'internalInfo'];
-              
-              for (const [key, value] of Object.entries(row)) {
-                // Skip completely empty values but keep 0, false, etc.
-                if (value === null || value === undefined || value === '') {
-                  continue;
-                }
-                
-                // Check if this key should be unflattened
-                const shouldUnflatten = key.includes('_') && 
-                  !['createdAt', 'updatedAt', 'publishedAt'].includes(key) &&
-                  componentPrefixes.some(prefix => key.startsWith(prefix + '_'));
-                
-                if (shouldUnflatten) {
-                  // Handle nested objects like corporateInfo_companyName
-                  const parts = key.split('_');
-                  let current = result;
-                  
-                  for (let i = 0; i < parts.length - 1; i++) {
-                    if (!current[parts[i]]) {
-                      current[parts[i]] = {};
-                    }
-                    current = current[parts[i]];
-                  }
-                  
-                  current[parts[parts.length - 1]] = value;
-                } else {
-                  // Handle arrays/JSON strings
-                  if (typeof value === 'string' && (value.startsWith('[') || value.startsWith('{'))) {
-                    try {
-                      result[key] = JSON.parse(value);
-                    } catch (error) {
-                      result[key] = value; // Keep as string if parsing fails
-                    }
-                  } else {
-                    result[key] = value;
-                  }
-                }
-              }
-              
-              // Debug info removed for cleaner logs
-              
-              return result;
-            });
-            
-            importData[contentTypeName] = unflattened;
-            strapi.log.info(`Mapped sheet ${sheetName} to ${contentTypeName}`);
-          }
-        });
-        
-        strapi.log.info('Final import data keys:', Object.keys(importData));
-      } else {
-        throw new Error('Unsupported file format. Please use JSON or Excel files.');
-      }
+    if (fileExtension === 'json') {
+      const fileContent = fs.readFileSync(filePath, 'utf8');
+      importData = JSON.parse(fileContent);
+      strapi.log.info('Parsed JSON data:', Object.keys(importData));
+    } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+      importData = transformExcelData(filePath);
+    }
+    result = await bulkInsertData(importData);
+    return result;
+  } catch (error) {
+    // Clean up uploaded file on error
+    const filePath = file && (file.path || file.filepath);
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    throw error;
+  }
+}
 
-      const results = {
-        created: 0,
-        updated: 0,
-        errors: [],
-      };
 
-      // Handle different data structures
-      const dataToProcess = importData.data || importData;
+function transformExcelData(filePath) {
+    const workbook = XLSX.readFile(filePath);
+    const importData = {};
 
-      for (const [contentType, entries] of Object.entries(dataToProcess)) {
+    const parseJsonIfNeeded = (value) => {
+        if (typeof value !== 'string') return value;
+        const trimmed = value.trim();
+        if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return value;
+
         try {
-          // If targetContentType is specified, only process that content type
-          if (targetContentType && contentType !== targetContentType) {
-            continue;
-          }
+        return JSON.parse(trimmed);
+        } catch {
+        return value; // keep as string if invalid JSON
+        }
+    };
 
-          // Skip if not an API content type
-          if (!contentType.startsWith('api::')) {
-            continue;
-          }
+    const isComponentField = (key) => {
+        if (SPECIAL_KEYS.includes(key)) return false;
+        const parts = key.split('_');
+        return parts.length === 2; // exactly one underscore
+    };
 
-          // Check if content type exists
-          if (!strapi.contentTypes[contentType]) {
-            results.errors.push(`Content type ${contentType} not found`);
-            continue;
-          }
+    function unflattenRow(rows, existedComponents = []) {
+      const result = [];
+      for (const row of rows) {
+        const rowData = {};
 
-          if (!Array.isArray(entries)) {
-            results.errors.push(`Invalid data format for ${contentType}`);
-            continue;
-          }
-
-          for (const entry of entries) {
-            try {
-              // Extract system fields for update/create logic
-              const { 
-                id, 
-                documentId, 
-                status,
-                createdAt, 
-                updatedAt, 
-                publishedAt, 
-                createdBy, 
-                updatedBy, 
-                localizations,
-                locale,
-                ...cleanEntry 
-              } = entry;
-
-              // Skip empty entries
-              if (!cleanEntry || Object.keys(cleanEntry).length === 0) {
-                strapi.log.warn('Skipping empty entry');
-                continue;
-              }
-              
-              // Clean up empty string values and convert to null
-              for (const [key, value] of Object.entries(cleanEntry)) {
-                if (value === '' || value === 'null' || value === 'undefined') {
-                  cleanEntry[key] = null;
-                }
-              }
-              
-              let existingEntry = null;
-              let updateMode = false;
-              
-              // Only try to find existing entry if documentId is provided and valid
-              if (documentId && documentId !== '' && documentId !== 'null' && documentId !== 'undefined') {
-                try {
-                  if (strapi.documents) {
-                    existingEntry = await strapi.documents(contentType).findOne({
-                      documentId: documentId,
-                    });
-                    if (existingEntry) {
-                      updateMode = true;
-                      strapi.log.info(`Found existing entry for update: ${documentId}`);
-                    }
-                  }
-                } catch (error) {
-                  // Entry not found, will create new one
-                  strapi.log.info(`DocumentId ${documentId} not found, will create new entry`);
-                }
-              }
-              
-              // If no documentId provided or not found, this will be a new entry
-              if (!existingEntry) {
-                strapi.log.info(`Creating new entry for: ${cleanEntry.shortName || cleanEntry.name || cleanEntry.title || 'Unknown'}`);
-              }
-              
-              // Skip entries without basic required fields
-              if (!cleanEntry.shortName && !cleanEntry.name && !cleanEntry.title) {
-                continue;
-              }
-              
-              // Ensure required components exist for corporate
-              if (contentType === 'api::corporate.corporate') {
-                if (!cleanEntry.corporateInfo) cleanEntry.corporateInfo = {};
-                if (!cleanEntry.meetingRequirements) cleanEntry.meetingRequirements = {};
-                if (!cleanEntry.internalInfo) cleanEntry.internalInfo = {};
-              }
-              
-              if (existingEntry) {
-                // Check if there are actual changes before updating
-                const hasChanges = this.hasDataChanges(existingEntry, cleanEntry);
-                const statusChanged = (status === 'published') !== !!existingEntry.publishedAt;
-                
-                if (hasChanges || statusChanged) {
-                  try {
-                    if (strapi.documents) {
-                      const updateData = {
-                        documentId: existingEntry.documentId,
-                        data: cleanEntry,
-                      };
-                      
-                      // Handle status change
-                      if (statusChanged) {
-                        updateData.status = status === 'published' ? 'published' : 'draft';
-                      }
-                      
-                      await strapi.documents(contentType).update(updateData);
-                      results.updated++;
-                    } else {
-                      await strapi.entityService.update(contentType, existingEntry.id, {
-                        data: cleanEntry,
-                      });
-                      results.updated++;
-                    }
-                  } catch (updateError) {
-                    results.errors.push(`Failed to update entry: ${updateError.message}`);
-                  }
-                } else {
-                  // No changes, skip update
-                  strapi.log.info(`No changes detected for entry: ${cleanEntry.shortName || 'Unknown'}`);
-                }
-              } else {
-                // Create new entry
-                try {
-                  if (strapi.documents) {
-                    await strapi.documents(contentType).create({
-                      data: cleanEntry,
-                      status: status === 'published' ? 'published' : 'draft',
-                    });
-                    results.created++;
-                  } else {
-                    await strapi.entityService.create(contentType, {
-                      data: cleanEntry,
-                    });
-                    results.created++;
-                  }
-                } catch (createError) {
-                  results.errors.push(`Failed to create entry: ${createError.message}`);
-                }
-              }
-            } catch (error) {
-              results.errors.push(`Failed to import entry in ${contentType}: ${error.message}`);
-              strapi.log.error('Import entry error:', error);
+        for (const [key, value] of Object.entries(row)) {
+            if (value === null || value === undefined || value === '') {
+              rowData[key] = null
             }
+
+            if (isComponentField(key)) {
+                const [comp, field] = key.split('_');
+
+                if (!rowData[comp]) rowData[comp] = {};
+                rowData[comp][field] = parseJsonIfNeeded(value);
+
+            } else {
+              rowData[key] = parseJsonIfNeeded(value);
+            }
+        }
+
+        for (const comp of existedComponents) {
+          if (!rowData[comp]) {
+            rowData[comp] = {};
           }
-        } catch (error) {
-          results.errors.push(`Failed to process ${contentType}: ${error.message}`);
-          strapi.log.error('Import process error:', error);
         }
+
+        rowData["publishedAt"] = new Date();
+
+        result.push(rowData);
       }
 
-      // Clean up uploaded file
-      if (filePath && fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
+      return result;
+    };
 
-      return results;
-    } catch (error) {
-      // Clean up uploaded file on error
-      const filePath = file && (file.path || file.filepath);
-      if (filePath && fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-      throw error;
-    }
-  },
+    const mapSheetNameToContentType = (sheetName) => {
+        if (!sheetName.startsWith('api__')) return sheetName;
+        return sheetName.replace(/^api__/, 'api::').replace(/_/g, '.');
+    };
 
-  hasDataChanges(existingEntry, newData) {
-    // Compare key fields to detect changes
-    const fieldsToCompare = ['shortName', 'name', 'title'];
-    
-    for (const field of fieldsToCompare) {
-      if (existingEntry[field] !== newData[field]) {
-        return true;
-      }
-    }
-    
-    // Compare nested objects (components)
-    const componentsToCompare = ['corporateInfo', 'meetingRequirements', 'internalInfo'];
-    
-    for (const component of componentsToCompare) {
-      if (existingEntry[component] && newData[component]) {
-        const existingStr = JSON.stringify(existingEntry[component]);
-        const newStr = JSON.stringify(newData[component]);
-        if (existingStr !== newStr) {
-          return true;
+    workbook.SheetNames.forEach(sheetName => {
+        const worksheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(worksheet);
+
+        if (!rows.length) return;
+
+        const contentTypeName = mapSheetNameToContentType(sheetName);
+
+        strapi.log.info(`Reading sheet "${sheetName}" -> ${rows.length} rows`);
+        strapi.log.info(`Mapped sheet to content-type: ${contentTypeName}`);
+
+        if(sheetName === 'api::corporate.corporate') {
+          importData[contentTypeName] = unflattenRow(rows, CORPORATE_COMPONENTS);
+        } else if (sheetName === 'api::investor.investor' || sheetName === 'api::vip_guest.vip_guest') {
+          importData[contentTypeName] = unflattenRow(rows, INVESTOR_COMPONENTS);
+        } else if (contentTypeName.startsWith('api::')) {
+          importData[contentTypeName] = unflattenRow(rows);
+        } else {
+          strapi.log.error(`Unknown content-type: ${contentTypeName}`);
+          return;
         }
+    });
+
+    strapi.log.info('Final import data keys:', Object.keys(importData));
+    return importData;
+}
+
+async function bulkInsertData(importData) {
+  const results = {
+    created: 0,
+    updated: 0,
+    errors: [],
+  };
+
+  for (const [contentType, entries] of Object.entries(importData)) {
+    // Validate entries
+    if (!strapi.contentTypes[contentType]) {
+      results.errors.push(`Content type ${contentType} not found`);
+      continue;
+    }
+    if (!Array.isArray(entries)) {
+      results.errors.push(`Invalid data format for ${contentType}`);
+      continue;
+    }
+
+    for (const entry of entries) {
+      try {
+        const { documentId, ...data } = entry; // keep id out, keep everything else
+
+        let existing = null;
+
+        if (documentId && documentId !== 'null' && documentId !== 'undefined') {
+          existing = await strapi.documents(contentType).findOne({ documentId });
+        }
+
+        if (existing) {
+          // Update
+          if (strapi.documents) {
+            await strapi.documents(contentType).update({
+              documentId,
+              data,
+            });
+          } else {
+            await strapi.entityService.update(contentType, existing.id, { data });
+          }
+          results.updated++;
+        } else {
+          // Create new
+          if (strapi.documents) {
+            await strapi.documents(contentType).create({ data });
+          } else {
+            await strapi.entityService.create(contentType, { data });
+          }
+          results.created++;
+        }
+      } catch (err) {
+        results.errors.push(`Failed ${existing ? 'updating' : 'creating'} in ${contentType}: ${err.message}`);
       }
     }
-    
-    return false;
-  },
-});
+  }
+
+  return results;
+}
+
+module.exports = {
+  importData,
+};
