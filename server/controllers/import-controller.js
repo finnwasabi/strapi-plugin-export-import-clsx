@@ -12,7 +12,7 @@ module.exports = ({ strapi }) => ({
       
       const importService = strapi.plugin('export-import-clsx').service('import-service');
       
-      const result = await importService.importData(file, targetContentType);
+      const result = await importService.importData(file);
       
       // Create appropriate message based on results
       let message = 'Import completed successfully';

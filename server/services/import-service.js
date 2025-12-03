@@ -1,10 +1,13 @@
 const XLSX = require('xlsx');
 const fs = require('fs');
-const SPECIAL_KEYS = ['id', 'documentId', 'locale', 'createdAt', 'updatedAt', 'publishedAt', 'createdBy', 'updatedBy', 'localizations'];
-const CORPORATE_COMPONENTS = ['interalInfo'];
-const INVESTOR_COMPONENTS = ['internalInfo'];
 
-async function importData(file, targetContentType) {
+function toCamel(str) {
+  return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+const SPECIAL_KEYS = ['id', 'documentId', 'locale', 'createdAt', 'updatedAt', 'publishedAt', 'createdBy', 'updatedBy', 'localizations'];
+
+async function importData(file) {
   let result;
   try {
     let importData;
@@ -58,7 +61,7 @@ function transformExcelData(filePath) {
         return parts.length === 2; // exactly one underscore
     };
 
-    function unflattenRow(rows, existedComponents = []) {
+    function unflattenRow(rows, targetContentType) {
       const result = [];
       for (const row of rows) {
         const rowData = {};
@@ -79,6 +82,7 @@ function transformExcelData(filePath) {
             }
         }
 
+        existedComponents = getComponentFields(targetContentType);
         for (const comp of existedComponents) {
           if (!rowData[comp]) {
             rowData[comp] = {};
@@ -109,12 +113,8 @@ function transformExcelData(filePath) {
         strapi.log.info(`Reading sheet "${sheetName}" -> ${rows.length} rows`);
         strapi.log.info(`Mapped sheet to content-type: ${contentTypeName}`);
 
-        if(sheetName === 'api::corporate.corporate') {
-          importData[contentTypeName] = unflattenRow(rows, CORPORATE_COMPONENTS);
-        } else if (sheetName === 'api::investor.investor' || sheetName === 'api::vip_guest.vip_guest') {
-          importData[contentTypeName] = unflattenRow(rows, INVESTOR_COMPONENTS);
-        } else if (contentTypeName.startsWith('api::')) {
-          importData[contentTypeName] = unflattenRow(rows);
+        if (contentTypeName.startsWith('api::')) {
+          importData[contentTypeName] = unflattenRow(rows, contentTypeName);
         } else {
           strapi.log.error(`Unknown content-type: ${contentTypeName}`);
           return;
@@ -124,6 +124,73 @@ function transformExcelData(filePath) {
     strapi.log.info('Final import data keys:', Object.keys(importData));
     return importData;
 }
+
+function getRelationFields(contentType) {
+  const schema = strapi.contentTypes[contentType];
+
+  if (!schema) {
+    strapi.log.warn(`Content type ${contentType} not found`);
+    return [];
+  }
+
+  return Object.entries(schema.attributes)
+    .filter(([_, attr]) => attr.type === "relation")
+    .map(([fieldName, attr]) => ({
+      field: toCamel(fieldName),
+      target: attr.target, // e.g. "api::category.category"
+      relation: attr.relation,
+    }));
+}
+
+function getComponentFields(contentType) {
+  const schema = strapi.contentTypes[contentType];
+
+  if (!schema) {
+    strapi.log.warn(`Content type ${contentType} not found`);
+    return [];
+  }
+
+  return Object.entries(schema.attributes)
+    .filter(([_, attr]) => attr.type === "component")
+    .map(([fieldName, attr]) => toCamel(fieldName));
+}
+
+async function handleRelations(entry, relationFields) {
+  const newEntry = { ...entry };
+
+  for (const rel of relationFields) {
+    const { field, target } = rel;
+    const relValue = entry[field];
+    try {
+      if (!relValue) continue;
+
+      if (Array.isArray(relValue)) {
+        const processed = [];
+
+        for (const item of relValue) {
+          if (item.id) {
+            processed.push({ id: item.id });
+          } else {
+            const created = await strapi.documents(target).create({ data: item });
+            processed.push({ id: created.id });
+          }
+        }
+        newEntry[field] = processed;
+        continue;
+      }
+
+      if (!relValue.id) {
+        const created = await strapi.documents(target).create({ data: relValue });
+        newEntry[field] = { id: created.id };
+      }
+    } catch (err) {
+      throw new Error(`Field: ${field}, data: ${JSON.stringify(relValue)}, error: ${err.message}`);
+    }
+  }
+
+  return newEntry;
+}
+
 
 async function bulkInsertData(importData) {
   const results = {
@@ -143,37 +210,33 @@ async function bulkInsertData(importData) {
       continue;
     }
 
-    for (const entry of entries) {
+    for (i = 0; i < entries.length; i++) {
+      const entry = entries[i];
       let existing = null;
       try {
-        const { documentId, ...data } = entry; // keep id out, keep everything else
+        let { documentId, ...data } = entry; // keep id out, keep everything else
 
         if (documentId && documentId !== 'null' && documentId !== 'undefined') {
           existing = await strapi.documents(contentType).findOne({ documentId });
         }
 
+        relationFields = getRelationFields(contentType);
+        if (relationFields.length) {
+          data = await handleRelations(data, relationFields);
+        }
+
         if (existing) {
-          // Update
-          if (strapi.documents) {
-            await strapi.documents(contentType).update({
-              documentId,
-              data,
-            });
-          } else {
-            await strapi.entityService.update(contentType, existing.id, { data });
-          }
+          await strapi.documents(contentType).update({
+            documentId,
+            data,
+          });
           results.updated++;
         } else {
-          // Create new
-          if (strapi.documents) {
-            await strapi.documents(contentType).create({ data });
-          } else {
-            await strapi.entityService.create(contentType, { data });
-          }
+          await strapi.documents(contentType).create({ data });
           results.created++;
         }
       } catch (err) {
-        results.errors.push(`Failed ${existing ? 'updating' : 'creating'} in ${contentType}: ${err.message}`);
+        results.errors.push(`Failed ${existing ? 'updating' : 'creating'} on row ${i+2}: ${err.message}`);
       }
     }
   }
