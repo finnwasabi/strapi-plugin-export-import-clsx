@@ -4,8 +4,17 @@ const fs = require('fs');
 function toCamel(str) {
   return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
-
-const SPECIAL_KEYS = ['id', 'documentId', 'locale', 'createdAt', 'updatedAt', 'publishedAt', 'createdBy', 'updatedBy', 'localizations'];
+const SYSTEM_KEYS = [
+  'documentId', 
+  'locale', 
+  'createdAt', 
+  'updatedAt', 
+  'publishedAt', 
+  'createdBy', 
+  'updatedBy', 
+  'localizations', 
+  'status'
+];
 
 async function importData(file) {
   let result;
@@ -56,7 +65,6 @@ function transformExcelData(filePath) {
     };
 
     const isComponentField = (key) => {
-        if (SPECIAL_KEYS.includes(key)) return false;
         const parts = key.split('_');
         return parts.length === 2; // exactly one underscore
     };
@@ -88,8 +96,6 @@ function transformExcelData(filePath) {
             rowData[comp] = {};
           }
         }
-
-        rowData["publishedAt"] = new Date();
 
         result.push(rowData);
       }
@@ -142,6 +148,19 @@ function getRelationFields(contentType) {
     }));
 }
 
+function getRelationFieldsStrArr(contentType) {
+  const schema = strapi.contentTypes[contentType];
+
+  if (!schema) {
+    strapi.log.warn(`Content type ${contentType} not found`);
+    return [];
+  }
+
+  return Object.entries(schema.attributes)
+    .filter(([_, attr]) => attr.type === "relation")
+    .map(([fieldName, attr]) => toCamel(fieldName));
+}
+
 function getComponentFields(contentType) {
   const schema = strapi.contentTypes[contentType];
 
@@ -155,8 +174,15 @@ function getComponentFields(contentType) {
     .map(([fieldName, attr]) => toCamel(fieldName));
 }
 
-async function handleRelations(entry, relationFields) {
+async function handleRelations(entry, contentType) {
+  let relationFields = getRelationFields(contentType);
+  if (relationFields.length === 0) {
+    return entry;
+  }
+
+  let existing = null;
   const newEntry = { ...entry };
+  let isUpdated = false;
 
   for (const rel of relationFields) {
     const { field, target } = rel;
@@ -169,6 +195,15 @@ async function handleRelations(entry, relationFields) {
 
         for (const item of relValue) {
           if (item.id) {
+            existing = await strapi.documents(target).findFirst({
+              filters: {
+                id: { $eq: item.id }
+              },
+             });
+            if (existing && hasChanges(existing, item, getRelationFieldsStrArr(target))) {
+              await strapi.documents(target).update({ documentId: existing.documentId, data: item });
+              isUpdated = true;
+            }
             processed.push({ id: item.id });
           } else {
             const created = await strapi.documents(target).create({ data: item });
@@ -182,13 +217,77 @@ async function handleRelations(entry, relationFields) {
       if (!relValue.id) {
         const created = await strapi.documents(target).create({ data: relValue });
         newEntry[field] = { id: created.id };
+      } else {
+        existing = await strapi.documents(target).findFirst({
+          filters: {
+            id: { $eq: relValue.id }
+          },
+         });
+        if (hasChanges(existing, relValue, getRelationFieldsStrArr(target))) {
+          await strapi.documents(target).update({ documentId: existing.documentId, data: relValue });
+          isUpdated = true;
+        }
+        newEntry[field] = { id: relValue.id };
       }
     } catch (err) {
       throw new Error(`Field: ${field}, data: ${JSON.stringify(relValue)}, error: ${err.message}`);
     }
   }
 
-  return newEntry;
+  return [newEntry, isUpdated];
+}
+
+function hasChanges(existing, incoming, relationFieldStrArr = []) {
+  if (!incoming || typeof incoming !== "object") return false;
+
+  for (const key of Object.keys(incoming)) {
+    // Skip system keys
+    if (SYSTEM_KEYS.includes(key)) continue;
+
+    // Skip relation fields entirely
+    if (relationFieldStrArr.includes(key)) continue;
+
+    const newVal = incoming[key];
+    const oldVal = existing[key];
+
+    // If incoming defines a field but existing doesn't → change
+    if (oldVal === undefined || newVal === undefined) {
+      continue;
+    }
+
+    // Primitive comparison
+    if (newVal === null || typeof newVal !== "object") {
+      if (oldVal !== newVal) {
+        return true;
+      }
+      continue;
+    }
+
+    // ARRAY comparison
+    if (Array.isArray(newVal)) {
+      if (!Array.isArray(oldVal)) return true;
+      if (newVal.length !== oldVal.length) return true;
+      // Compare values shallowly
+      for (let i = 0; i < newVal.length; i++) {
+        if (typeof newVal[i] === "object" && typeof oldVal[i] === "object" && hasChanges(oldVal[i], newVal[i])) {
+          return true;
+        } else if (typeof newVal[i] !== "object" && typeof oldVal[i] !== "object" && newVal[i] !== oldVal[i]) {
+          return true;
+        }
+      }
+      continue;
+    }
+
+    // OBJECT comparison (recursive, but ONLY fields in incoming object)
+    if (typeof newVal === "object" && typeof oldVal === "object") {
+      if (hasChanges(oldVal, newVal)) {
+        return true;
+      }
+      continue;
+    }
+  }
+
+  return false;
 }
 
 
@@ -214,25 +313,35 @@ async function bulkInsertData(importData) {
       const entry = entries[i];
       let existing = null;
       try {
-        let { documentId, ...data } = entry; // keep id out, keep everything else
-
-        if (documentId && documentId !== 'null' && documentId !== 'undefined') {
-          existing = await strapi.documents(contentType).findOne({ documentId });
+        let { id, ...data } = entry; // keep id out, keep everything else
+        let isUpdated = false;
+        let isCreated = false;
+        if (id && id !== 'null' && id !== 'undefined') {
+          existing = await strapi.documents(contentType).findFirst({
+            filters: {
+              id: { $eq: id }
+            },
+            populate: '*'
+          });
         }
 
-        relationFields = getRelationFields(contentType);
-        if (relationFields.length) {
-          data = await handleRelations(data, relationFields);
-        }
+        [data, isUpdated] = await handleRelations(data, contentType);
 
         if (existing) {
-          await strapi.documents(contentType).update({
-            documentId,
-            data,
-          });
-          results.updated++;
+          if (hasChanges(existing, data)) {
+            await strapi.documents(contentType).update({
+              documentId: existing.documentId,
+              data,
+            });
+            isUpdated = true;
+          }
         } else {
           await strapi.documents(contentType).create({ data });
+          isCreated = true;
+        }
+        if (isUpdated) {
+          results.updated++;
+        } else if (isCreated) {
           results.created++;
         }
       } catch (err) {
