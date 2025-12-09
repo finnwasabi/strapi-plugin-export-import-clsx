@@ -4,17 +4,47 @@ const fs = require('fs');
 function toCamel(str) {
   return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
+
 const SYSTEM_KEYS = [
-  'documentId', 
-  'locale', 
-  'createdAt', 
-  'updatedAt', 
-  'publishedAt', 
-  'createdBy', 
-  'updatedBy', 
-  'localizations', 
+  'documentId',
+  'locale',
+  'createdAt',
+  'updatedAt',
+  'publishedAt',
+  'createdBy',
+  'updatedBy',
+  'localizations',
   'status'
 ];
+
+const EMAIL_KEYS = [
+  'investor',
+  'investors',
+  'vipGuest',
+  'vipGuests',
+  'whitelistEmail',
+  'whitelistEmails',
+  'corporateRepresentative',
+  'corporateRepresentatives',
+  'representative',
+  'representatives'
+];
+
+const EMAIL_FIELDS = [
+  'email',
+  'businessEmail',
+];
+
+const TICKER_KEYS = [
+  'corporate',
+  'corporates',
+];
+
+const TICKER_FIELD = "tickerCode";
+
+const OTHER_FIELDS = [
+  'name','title'
+]
 
 async function importData(file) {
   let result;
@@ -71,20 +101,19 @@ function transformExcelData(filePath) {
 
     function unflattenRow(rows, targetContentType) {
       const result = [];
+      const attr = strapi.contentTypes[targetContentType].attributes;
       for (const row of rows) {
         const rowData = {};
 
         for (const [key, value] of Object.entries(row)) {
             if (value === null || value === undefined || value === '') {
               rowData[key] = null
-            }
-
-            if (isComponentField(key)) {
-                const [comp, field] = key.split('_');
-
-                if (!rowData[comp]) rowData[comp] = {};
-                rowData[comp][field] = parseJsonIfNeeded(value);
-
+            } else if (attr[key] && attr[key].customField && attr[key].type === 'json' && attr[key].default === '[]') {
+              rowData[key] = parseJsonIfNeeded(value).split(',');
+            } else if (isComponentField(key)) {
+              const [comp, field] = key.split('_');
+              if (!rowData[comp]) rowData[comp] = {};
+              rowData[comp][field] = parseJsonIfNeeded(value);
             } else {
               rowData[key] = parseJsonIfNeeded(value);
             }
@@ -104,8 +133,7 @@ function transformExcelData(filePath) {
     };
 
     const mapSheetNameToContentType = (sheetName) => {
-        if (!sheetName.startsWith('api__')) return sheetName;
-        return sheetName.replace(/^api__/, 'api::').replace(/_/g, '.');
+        return "api::" + sheetName + "." + sheetName;
     };
 
     workbook.SheetNames.forEach(sheetName => {
@@ -148,19 +176,6 @@ function getRelationFields(contentType) {
     }));
 }
 
-function getRelationFieldsStrArr(contentType) {
-  const schema = strapi.contentTypes[contentType];
-
-  if (!schema) {
-    strapi.log.warn(`Content type ${contentType} not found`);
-    return [];
-  }
-
-  return Object.entries(schema.attributes)
-    .filter(([_, attr]) => attr.type === "relation")
-    .map(([fieldName, attr]) => toCamel(fieldName));
-}
-
 function getComponentFields(contentType) {
   const schema = strapi.contentTypes[contentType];
 
@@ -175,77 +190,84 @@ function getComponentFields(contentType) {
 }
 
 async function handleRelations(entry, contentType) {
-  let relationFields = getRelationFields(contentType);
-  if (relationFields.length === 0) {
-    return entry;
-  }
-
-  let existing = null;
-  const newEntry = { ...entry };
-  let isUpdated = false;
-
-  for (const rel of relationFields) {
-    const { field, target } = rel;
-    const relValue = entry[field];
-    try {
-      if (!relValue) continue;
-
-      if (Array.isArray(relValue)) {
-        const processed = [];
-
-        for (const item of relValue) {
-          if (item.id) {
-            existing = await strapi.documents(target).findFirst({
-              filters: {
-                id: { $eq: item.id }
-              },
-             });
-            if (existing && hasChanges(existing, item, getRelationFieldsStrArr(target))) {
-              await strapi.documents(target).update({ documentId: existing.documentId, data: item });
-              isUpdated = true;
-            }
-            processed.push({ id: item.id });
-          } else {
-            const created = await strapi.documents(target).create({ data: item });
-            processed.push({ id: created.id });
-          }
-        }
-        newEntry[field] = processed;
-        continue;
+  async function resolveRelationValue(field, value, target) {
+    const targetAttr = strapi.contentTypes[target].attributes;
+    if (EMAIL_KEYS.includes(field)) {
+      for (const emailField of EMAIL_FIELDS) {
+        if (!targetAttr[emailField]) continue;
+        const existing = await strapi.documents(target).findFirst({
+          filters: { [emailField]: { $eq: value } },
+        });
+        if (existing) return {id: existing.id};
       }
-
-      if (!relValue.id) {
-        const created = await strapi.documents(target).create({ data: relValue });
-        newEntry[field] = { id: created.id };
-      } else {
-        existing = await strapi.documents(target).findFirst({
-          filters: {
-            id: { $eq: relValue.id }
-          },
-         });
-        if (hasChanges(existing, relValue, getRelationFieldsStrArr(target))) {
-          await strapi.documents(target).update({ documentId: existing.documentId, data: relValue });
-          isUpdated = true;
-        }
-        newEntry[field] = { id: relValue.id };
+      return null;
+    } else if (TICKER_KEYS.includes(field)) {
+      if (!targetAttr[TICKER_FIELD]) return null;
+      const existing = await strapi.documents(target).findFirst({
+        filters: { [TICKER_FIELD]: { $eq: value } },
+      });
+      return { id: existing.id };
+    } else {
+      for (const field of OTHER_FIELDS) {
+        if (!targetAttr[field]) continue;
+        const existing = await strapi.documents(target).findFirst({
+          filters: { [field]: { $eq: value } },
+        });
+        if (existing) return {id: existing.id};
       }
-    } catch (err) {
-      throw new Error(`Field: ${field}, data: ${JSON.stringify(relValue)}, error: ${err.message}`);
+      return null;
     }
   }
 
-  return [newEntry, isUpdated];
+  const relationFields = getRelationFields(contentType);
+  if (relationFields.length === 0) return entry;
+
+  const updatedEntry = { ...entry };
+
+  for (const rel of relationFields) {
+    const { field, target, relation } = rel;
+
+    let value = entry[field];
+    if (!value || value === "") {
+      if (relation === "manyToMany" || relation === "oneToMany") {
+        updatedEntry[field] = [];
+      } else {
+        updatedEntry[field] = null;
+      }
+      continue;
+    };
+
+    // Convert CSV to array
+    if (typeof value === "string" && value.includes(",")) {
+      value = value.split(",");
+    }
+
+    const values = Array.isArray(value) ? value : [value];
+    try {
+      const processed = [];
+
+      for (const v of values) {
+        const resolved = await resolveRelationValue(field, v, target);
+        if (resolved) processed.push(resolved);
+      }
+
+      updatedEntry[field] = Array.isArray(value) ? processed : processed[0];
+    } catch (err) {
+      throw new Error(
+        `Failed processing field "${field}" with value "${JSON.stringify(value)}": ${err.message}`
+      );
+    }
+  }
+
+  return updatedEntry;
 }
 
-function hasChanges(existing, incoming, relationFieldStrArr = []) {
+function hasChanges(existing, incoming) {
   if (!incoming || typeof incoming !== "object") return false;
 
   for (const key of Object.keys(incoming)) {
     // Skip system keys
     if (SYSTEM_KEYS.includes(key)) continue;
-
-    // Skip relation fields entirely
-    if (relationFieldStrArr.includes(key)) continue;
 
     const newVal = incoming[key];
     const oldVal = existing[key];
@@ -325,7 +347,7 @@ async function bulkInsertData(importData) {
           });
         }
 
-        [data, isUpdated] = await handleRelations(data, contentType);
+        data = await handleRelations(data, contentType);
 
         if (existing) {
           if (hasChanges(existing, data)) {

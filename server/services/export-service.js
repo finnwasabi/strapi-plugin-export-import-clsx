@@ -126,9 +126,8 @@ module.exports = ({ strapi }) => ({
         strapi.log.error(`Failed to export ${ct}:`, error);
       }
     }
-    
+
     if (format === 'excel') {
-      console.log(exportData.data)
       return this.convertToExcel(exportData.data);
     }
 
@@ -233,31 +232,91 @@ module.exports = ({ strapi }) => ({
     const workbook = XLSX.utils.book_new();
     let hasData = false;
 
+    const SYSTEM_KEYS = [
+      'documentId',
+      'locale',
+      'createdAt',
+      'updatedAt',
+      'publishedAt',
+      'createdBy',
+      'updatedBy',
+      'localizations',
+      'status'
+    ];
+
+    const EMAIL_KEYS = [
+      'investor',
+      'investors',
+      'vipGuest',
+      'vipGuests',
+      'whitelistEmail',
+      'whitelistEmails',
+      'corporateRepresentative',
+      'corporateRepresentatives',
+      'representative',
+      'representatives'
+    ];
+
+    const EMAIL_FIELDS = [
+      'email',
+      'businessEmail',
+    ];
+
+    const TICKER_KEYS = [
+      'corporate',
+      'corporates',
+    ];
+
+    const TICKER_FIELD = "tickerCode";
+    const NAME_FIELD = "name";
+    const TITLE = "title";
+
     for (const [contentType, entries] of Object.entries(data)) {
       // Clean sheet name (Excel has restrictions)
-      const sheetName = contentType.replace(/[^\w\s]/gi, '_').substring(0, 31);
+      const sheetName = contentType
+        .split('.')
+        .pop()
+        .replace(/[^\w\s]/gi, '_')
+        .substring(0, 31);
+
       if (entries && entries.length > 0) {
         hasData = true;
 
         const attr = strapi.contentTypes[contentType].attributes;
         const customFields = Object.entries(attr)
-          .filter(([key, definition]) => definition.customField)
-          .map(([key, definition]) => key);
+          .filter(([key, definition]) =>
+            definition.customField && definition.type !== 'json'
+          )
+          .map(([key]) => key);
+
+        const relationFields = Object.entries(attr)
+          .filter(([key, definition]) => definition.type === 'relation')
+          .map(([key]) => key);
+
+        function handleObject(key, value) {
+          if (!value) return;
+          if (EMAIL_KEYS.includes(key)) {
+            for (const emailField of EMAIL_FIELDS) {
+              if (value[emailField]) {
+                return value[emailField];
+              }
+            }
+          } else if (TICKER_KEYS.includes(key)) {
+            if (value[TICKER_FIELD]) {
+              return value[TICKER_FIELD];
+            }
+          } else if (relationFields.includes(key)) {
+            if (value[NAME_FIELD]) {
+              return value[NAME_FIELD];
+            } else if (value[TITLE]) {
+              return value[TITLE];
+            }
+          }
+          return undefined
+        }
 
         // Clean and flatten entries for Excel
         const cleanedEntries = entries.map(entry => {
-          const SYSTEM_KEYS = [
-            'documentId', 
-            'locale', 
-            'createdAt', 
-            'updatedAt', 
-            'publishedAt', 
-            'createdBy', 
-            'updatedBy', 
-            'localizations', 
-            'status'
-          ];
-
           function cleanAndFlatten(obj) {
             if (Array.isArray(obj)) {
               return obj.map(cleanAndFlatten);
@@ -271,19 +330,27 @@ module.exports = ({ strapi }) => ({
                 if (SYSTEM_KEYS.includes(key)) continue;
                 if (customFields.includes(key)) continue;
 
-                // Null or primitive
                 if (value === null || typeof value !== 'object') {
                   result[key] = value;
                   continue;
                 }
 
-                // Array handling
+                if (!Array.isArray(value) && typeof value === 'object') {
+                  let temp = handleObject(key, value);
+                  if (temp !== undefined) {
+                    result[key] = temp;
+                  }
+                  continue;
+                }
+
                 if (Array.isArray(value)) {
-                  // Array of objects
                   if (value.length > 0 && typeof value[0] === 'object') {
-                    result[key] = value.map(cleanAndFlatten);
+                    let arrValue = [];
+                    for (const subValue in value) {
+                      arrValue.push(handleObject(key, value[subValue]));
+                    }
+                    result[key] = arrValue;
                   } else {
-                    // Array of primitives
                     result[key] = value;
                   }
                   continue;
@@ -315,7 +382,7 @@ module.exports = ({ strapi }) => ({
           for (const key in obj) {
             const value = obj[key];
             if (Array.isArray(value)) {
-              result[key] = JSON.stringify(value);
+              result[key] = value.join(",");
             } else {
               result[key] = value;
             }
