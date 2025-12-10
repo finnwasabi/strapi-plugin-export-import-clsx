@@ -1,5 +1,5 @@
 {
-  "name": "@handsomekhang/strapi-plugin-export-import-clsx",
+  "name": "@nkhang1902/strapi-plugin-export-import-clsx",
   "version": "1.0.3",
   "description": "A powerful Strapi plugin for exporting and importing data with Excel support and advanced filtering",
   "main": "./strapi-server.js",
