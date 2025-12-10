@@ -243,41 +243,18 @@ module.exports = ({ strapi }) => ({
       'localizations',
       'status'
     ];
-
-    const EMAIL_KEYS = [
-      'investor',
-      'investors',
-      'vipGuest',
-      'vipGuests',
-      'whitelistEmail',
-      'whitelistEmails',
-      'corporateRepresentative',
-      'corporateRepresentatives',
-      'representative',
-      'representatives'
-    ];
-
-    const EMAIL_FIELDS = [
-      'email',
-      'businessEmail',
-    ];
-
-    const TICKER_KEYS = [
-      'corporate',
-      'corporates',
-    ];
-
-    const TICKER_FIELD = "tickerCode";
-    const NAME_FIELD = "name";
-    const TITLE = "title";
+    const SHORTCUT_FIELDS = [
+      'email','businessEmail','name','title','tickerCode',
+    ]
 
     for (const [contentType, entries] of Object.entries(data)) {
       // Clean sheet name (Excel has restrictions)
       const sheetName = contentType
         .split('.')
         .pop()
-        .replace(/[^\w\s]/gi, '_')
+        .replace(/[^\w\s-]/gi, '_')
         .substring(0, 31);
+
 
       if (entries && entries.length > 0) {
         hasData = true;
@@ -285,7 +262,7 @@ module.exports = ({ strapi }) => ({
         const attr = strapi.contentTypes[contentType].attributes;
         const customFields = Object.entries(attr)
           .filter(([key, definition]) =>
-            definition.customField && definition.type !== 'json'
+            definition.customField && definition.type !== 'json' 
           )
           .map(([key]) => key);
 
@@ -293,28 +270,21 @@ module.exports = ({ strapi }) => ({
           .filter(([key, definition]) => definition.type === 'relation')
           .map(([key]) => key);
 
+        const componentFields = Object.entries(attr)
+          .filter(([key, definition]) => definition.type === 'component')
+          .map(([key]) => key);
+
         function handleObject(key, value) {
           if (!value) return;
-          if (EMAIL_KEYS.includes(key)) {
-            for (const emailField of EMAIL_FIELDS) {
-              if (value[emailField]) {
-                return value[emailField];
+          if (relationFields.includes(key)) {
+            for (const field of SHORTCUT_FIELDS) {
+              if (value[field]) {
+                return value[field];
               }
-            }
-          } else if (TICKER_KEYS.includes(key)) {
-            if (value[TICKER_FIELD]) {
-              return value[TICKER_FIELD];
-            }
-          } else if (relationFields.includes(key)) {
-            if (value[NAME_FIELD]) {
-              return value[NAME_FIELD];
-            } else if (value[TITLE]) {
-              return value[TITLE];
             }
           }
           return undefined
         }
-
         // Clean and flatten entries for Excel
         const cleanedEntries = entries.map(entry => {
           function cleanAndFlatten(obj) {
@@ -329,6 +299,7 @@ module.exports = ({ strapi }) => ({
                 // Skip system keys
                 if (SYSTEM_KEYS.includes(key)) continue;
                 if (customFields.includes(key)) continue;
+                if (componentFields.includes(key)) continue;
 
                 if (value === null || typeof value !== 'object') {
                   result[key] = value;
@@ -356,15 +327,6 @@ module.exports = ({ strapi }) => ({
                   continue;
                 }
 
-                // Component (no documentId)
-                if (!('documentId' in value)) {
-                  for (const subKey in value) {
-                    if (subKey === 'id') continue; // skip id
-                    result[`${key}_${subKey}`] = value[subKey];
-                  }
-                  continue; // skip keeping the original key
-                }
-                // Relation object (has documentId)
                 result[key] = cleanAndFlatten(value);
               }
               return result;
@@ -382,7 +344,7 @@ module.exports = ({ strapi }) => ({
           for (const key in obj) {
             const value = obj[key];
             if (Array.isArray(value)) {
-              result[key] = value.join(",");
+              result[key] = value.join("|");
             } else {
               result[key] = value;
             }

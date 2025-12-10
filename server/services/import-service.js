@@ -17,35 +17,9 @@ const SYSTEM_KEYS = [
   'status'
 ];
 
-const EMAIL_KEYS = [
-  'investor',
-  'investors',
-  'vipGuest',
-  'vipGuests',
-  'whitelistEmail',
-  'whitelistEmails',
-  'corporateRepresentative',
-  'corporateRepresentatives',
-  'representative',
-  'representatives'
-];
-
-const EMAIL_FIELDS = [
-  'email',
-  'businessEmail',
-];
-
-const TICKER_KEYS = [
-  'corporate',
-  'corporates',
-];
-
-const TICKER_FIELD = "tickerCode";
-
-const OTHER_FIELDS = [
-  'name','title'
+const SHORTCUT_FIELDS = [
+  'email','businessEmail','name','title','tickerCode',
 ]
-
 async function importData(file) {
   let result;
   try {
@@ -109,23 +83,11 @@ function transformExcelData(filePath) {
             if (value === null || value === undefined || value === '') {
               rowData[key] = null
             } else if (attr[key] && attr[key].customField && attr[key].type === 'json' && attr[key].default === '[]') {
-              rowData[key] = parseJsonIfNeeded(value).split(',');
-            } else if (isComponentField(key)) {
-              const [comp, field] = key.split('_');
-              if (!rowData[comp]) rowData[comp] = {};
-              rowData[comp][field] = parseJsonIfNeeded(value);
+              rowData[key] = parseJsonIfNeeded(value).split('|');
             } else {
               rowData[key] = parseJsonIfNeeded(value);
             }
         }
-
-        existedComponents = getComponentFields(targetContentType);
-        for (const comp of existedComponents) {
-          if (!rowData[comp]) {
-            rowData[comp] = {};
-          }
-        }
-
         result.push(rowData);
       }
 
@@ -192,31 +154,15 @@ function getComponentFields(contentType) {
 async function handleRelations(entry, contentType) {
   async function resolveRelationValue(field, value, target) {
     const targetAttr = strapi.contentTypes[target].attributes;
-    if (EMAIL_KEYS.includes(field)) {
-      for (const emailField of EMAIL_FIELDS) {
-        if (!targetAttr[emailField]) continue;
-        const existing = await strapi.documents(target).findFirst({
-          filters: { [emailField]: { $eq: value } },
-        });
-        if (existing) return {id: existing.id};
-      }
-      return null;
-    } else if (TICKER_KEYS.includes(field)) {
-      if (!targetAttr[TICKER_FIELD]) return null;
+    for (const field of SHORTCUT_FIELDS) {
+      if (!targetAttr[field]) continue;
       const existing = await strapi.documents(target).findFirst({
-        filters: { [TICKER_FIELD]: { $eq: value } },
+        filters: { [field]: { $eq: value } },
       });
-      return { id: existing.id };
-    } else {
-      for (const field of OTHER_FIELDS) {
-        if (!targetAttr[field]) continue;
-        const existing = await strapi.documents(target).findFirst({
-          filters: { [field]: { $eq: value } },
-        });
-        if (existing) return {id: existing.id};
-      }
-      return null;
+      if (existing) return {id: existing.id};
+      throw new Error(`Data with ${field} ${value} not found`);
     }
+    return null;
   }
 
   const relationFields = getRelationFields(contentType);
@@ -238,8 +184,8 @@ async function handleRelations(entry, contentType) {
     };
 
     // Convert CSV to array
-    if (typeof value === "string" && value.includes(",")) {
-      value = value.split(",");
+    if (typeof value === "string" && (relation === "manyToMany" || relation === "oneToMany")) {
+      value = value.split("|");
     }
 
     const values = Array.isArray(value) ? value : [value];
@@ -254,7 +200,7 @@ async function handleRelations(entry, contentType) {
       updatedEntry[field] = Array.isArray(value) ? processed : processed[0];
     } catch (err) {
       throw new Error(
-        `Failed processing field "${field}" with value "${JSON.stringify(value)}": ${err.message}`
+        `Failed processing field ${field} with value ${JSON.stringify(value)}: ${err.message}`
       );
     }
   }
