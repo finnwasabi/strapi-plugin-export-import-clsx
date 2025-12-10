@@ -84,6 +84,10 @@ function transformExcelData(filePath) {
               rowData[key] = null
             } else if (attr[key] && attr[key].customField && attr[key].type === 'json' && attr[key].default === '[]') {
               rowData[key] = parseJsonIfNeeded(value).split('|');
+            } else if (isComponentField(key)) {
+              const [comp, field] = key.split('_');
+              if (!rowData[comp]) rowData[comp] = {};
+              rowData[comp][field] = parseJsonIfNeeded(value);
             } else {
               rowData[key] = parseJsonIfNeeded(value);
             }
@@ -186,6 +190,8 @@ async function handleRelations(entry, contentType) {
     // Convert CSV to array
     if (typeof value === "string" && (relation === "manyToMany" || relation === "oneToMany")) {
       value = value.split("|");
+    } else if (typeof value === "string" && value.includes("|")) {
+      throw new Error(`Invalid value for field ${field}: ${value}, ${field} is not an array`);
     }
 
     const values = Array.isArray(value) ? value : [value];
@@ -193,6 +199,7 @@ async function handleRelations(entry, contentType) {
       const processed = [];
 
       for (const v of values) {
+        if (!v || v === "") continue;
         const resolved = await resolveRelationValue(field, v, target);
         if (resolved) processed.push(resolved);
       }
@@ -208,13 +215,55 @@ async function handleRelations(entry, contentType) {
   return updatedEntry;
 }
 
+function handleComponents(data, existing, contentType) {
+  // Get the component fields for this content type
+  const compFields = getComponentFields(contentType);
+
+  for (const field of compFields) {
+    const newValue = data[field];
+    const oldValue = existing?.[field];
+
+    if (!newValue || !oldValue) continue;
+
+    //single component
+    if (!Array.isArray(newValue)) {
+      if (oldValue?.id) {
+        data[field].id = oldValue.id;
+      }
+      for (const key of Object.keys(data[field])) {
+        if (Array.isArray(oldValue[key])) {
+          data[field][key] = data[field][key].split("|");
+        }
+      }
+      continue;
+    }
+
+    //multiple components
+    if (Array.isArray(newValue) && Array.isArray(oldValue)) {
+      data[field] = newValue.map((block, i) => {
+        const oldBlock = oldValue[i];
+        if (oldBlock?.id) {
+          return { id: oldBlock.id, ...block };
+        }
+        for (const key of Object.keys(block)) {
+          if (Array.isArray(oldBlock[key])) {
+            block[key] = block[key].split("|");
+          }
+        }
+        return block;
+      });
+    }
+  }
+
+  return data;
+}
+
 function hasChanges(existing, incoming) {
   if (!incoming || typeof incoming !== "object") return false;
-
+  if (!existing || typeof existing !== "object") return true;
   for (const key of Object.keys(incoming)) {
     // Skip system keys
     if (SYSTEM_KEYS.includes(key)) continue;
-
     const newVal = incoming[key];
     const oldVal = existing[key];
 
@@ -277,49 +326,90 @@ async function bulkInsertData(importData) {
       continue;
     }
 
-    for (i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      let existing = null;
-      try {
-        let { id, ...data } = entry; // keep id out, keep everything else
-        let isUpdated = false;
-        let isCreated = false;
-        if (id && id !== 'null' && id !== 'undefined') {
-          existing = await strapi.documents(contentType).findFirst({
-            filters: {
-              id: { $eq: id }
-            },
-            populate: '*'
-          });
-        }
-
-        data = await handleRelations(data, contentType);
-
-        if (existing) {
-          if (hasChanges(existing, data)) {
-            await strapi.documents(contentType).update({
-              documentId: existing.documentId,
-              data,
-            });
-            isUpdated = true;
-          }
-        } else {
-          await strapi.documents(contentType).create({ data });
-          isCreated = true;
-        }
-        if (isUpdated) {
-          results.updated++;
-        } else if (isCreated) {
-          results.created++;
-        }
-      } catch (err) {
-        results.errors.push(`Failed ${existing ? 'updating' : 'creating'} on row ${i+2}: ${err.message}`);
-      }
+    try {
+      const { created, updated, errors } = await importEntries(entries, contentType);
+      results.created += created;
+      results.updated += updated;
+      results.errors = results.errors.concat(errors);
+    } catch (err) {
+      results.errors.push(err.message);
     }
   }
 
   return results;
 }
+
+async function importEntries(entries, contentType) {
+  const results = { created: 0, updated: 0, errors: [] };
+
+  await strapi.db.transaction(async ({ trx, rollback, onRollback }) => {
+    onRollback(() => {
+      strapi.log.error("Transaction rolled back due to an error!");
+      strapi.log.error(results.errors);
+    });
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      let existing = null;
+
+      try {
+        let { id, ...data } = entry;
+
+        // Check if document exists
+        if (id && id !== "null" && id !== "undefined") {
+          existing = await strapi.documents(contentType).findFirst(
+            {
+              filters: { id },
+              populate: "*",
+            },
+            { transaction: trx }
+          );
+        }
+
+        // Handle relations & components
+        data = await handleRelations(data, contentType, trx);
+        data = await handleComponents(data, existing, contentType);
+
+        // Update
+        if (existing) {
+          if (hasChanges(existing, data)) {
+            await strapi.documents(contentType).update(
+              {
+                documentId: existing.documentId,
+                data,
+              },
+              { transaction: trx }
+            );
+            results.updated++;
+          }
+        }
+
+        // Create
+        else {
+          await strapi.documents(contentType).create(
+            { data },
+            { transaction: trx }
+          );
+          results.created++;
+        }
+      } catch (err) {
+        results.errors.push(
+          `Failed ${existing ? "updating" : "creating"} on row ${
+            i + 2
+          }: ${err.message}`
+        );
+        results.created = 0;
+        results.updated = 0;
+
+        // IMPORTANT: force rollback
+        throw err;
+      }
+    }
+  });
+
+  return results;
+}
+
 
 module.exports = {
   importData,

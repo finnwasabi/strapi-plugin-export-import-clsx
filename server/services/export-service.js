@@ -262,12 +262,16 @@ module.exports = ({ strapi }) => ({
         const attr = strapi.contentTypes[contentType].attributes;
         const customFields = Object.entries(attr)
           .filter(([key, definition]) =>
-            definition.customField && definition.type !== 'json' 
+            definition.customField
           )
           .map(([key]) => key);
 
         const relationFields = Object.entries(attr)
           .filter(([key, definition]) => definition.type === 'relation')
+          .map(([key]) => key);
+
+        const skipFields = Object.entries(attr)
+          .filter(([key, definition]) => definition.type === 'media')
           .map(([key]) => key);
 
         const componentFields = Object.entries(attr)
@@ -299,7 +303,15 @@ module.exports = ({ strapi }) => ({
                 // Skip system keys
                 if (SYSTEM_KEYS.includes(key)) continue;
                 if (customFields.includes(key)) continue;
-                if (componentFields.includes(key)) continue;
+                if ([...skipFields, 'wishlist', 'availableSlot'].includes(key)) continue;
+
+                if (componentFields.includes(key)) {
+                  for (const subKey in value) {
+                    if (subKey === 'id') continue;
+                    result[`${key}_${subKey}`] = value[subKey];
+                  }
+                  continue;
+                }
 
                 if (value === null || typeof value !== 'object') {
                   result[key] = value;
@@ -326,8 +338,6 @@ module.exports = ({ strapi }) => ({
                   }
                   continue;
                 }
-
-                result[key] = cleanAndFlatten(value);
               }
               return result;
             } else {
