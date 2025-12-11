@@ -1,7 +1,7 @@
 const XLSX = require('xlsx');
 
 module.exports = ({ strapi }) => ({
-  async exportData(format = 'json', contentType = null, filters = {}, selectedIds = []) {
+  async exportData(format = 'json', contentType = null, rawFilters = {}, selectedIds = [], selectedField = null) {
     // Get only API content types (collections)
     let contentTypes;
     if (contentType) {
@@ -21,97 +21,77 @@ module.exports = ({ strapi }) => ({
     for (const ct of contentTypes) {
       try {
         // Parse filters from URL format
-        const parsedFilters = this.parseFilters(filters);
+        const parsedFilters = this.parseFilters(rawFilters);
 
-        strapi.log.info(`Exporting ${ct} with raw filters:`, filters);
-        strapi.log.info(`Parsed filters:`, parsedFilters);
-        strapi.log.info(`Selected IDs:`, selectedIds);
+        if (rawFilters['_q']) {
+          parsedFilters._q = rawFilters['_q'];
+        }
+
+        strapi.log.info(`Exporting ${ct} with raw filters: ${JSON.stringify(rawFilters)}`);
+        strapi.log.info(`Parsed filters: ${JSON.stringify(parsedFilters)}`);
+        strapi.log.info(`Selected IDs: ${JSON.stringify(selectedIds)}`);
 
         let entries = [];
+        let filters = parsedFilters.filters;
 
         // If specific IDs are selected, export only those
         if (selectedIds && selectedIds.length > 0) {
+          strapi.log.info(`Exporting selected: ${JSON.stringify(selectedIds)}, field: ${selectedField}`);
+          if (selectedField === 'id' || (strapi.contentTypes[ct].attributes[selectedField] &&["number", "integer", "biginteger", "float", "decimal"].includes(strapi.contentTypes[ct].attributes[selectedField].type))) {
+            selectedIds = selectedIds.map((id) => Number(id));
+          }
           try {
-            if (strapi.documents) {
-              // Get entries by documentId for Strapi v5
-              for (const id of selectedIds) {
-                try {
-                  const entry = await strapi.documents(ct).findOne({
-                    documentId: id,
-                    populate: '*',
-                  });
-                  if (entry) {
-                    entries.push(entry);
-                  }
-                } catch (error) {
-                  strapi.log.warn(`Failed to find entry ${id}:`, error.message);
-                }
-              }
-            } else {
-              // Fallback for older Strapi versions
-              for (const id of selectedIds) {
-                try {
-                  const entry = await strapi.entityService.findOne(ct, id, {
-                    populate: '*',
-                  });
-                  if (entry) {
-                    entries.push(entry);
-                  }
-                } catch (error) {
-                  strapi.log.warn(`Failed to find entry ${id}:`, error.message);
-                }
-              }
-            }
+            entries = await strapi.documents(ct).findMany({
+              filters: {
+                [selectedField]: { $in: selectedIds }
+              },
+              populate: '*'
+            });
           } catch (error) {
             strapi.log.error(`Failed to export selected entries:`, error);
           }
         } else {
           // Export all entries with filters
-          try {
-            if (strapi.documents) {
-              // Get all entries (both published and draft) but avoid duplicates
-              const allEntries = await strapi.documents(ct).findMany({
-                populate: '*',
-                // Don't specify status to get all
-              });
-              // Group by documentId and keep only the best version (published > modified draft > draft)
-              const uniqueEntries = new Map();
-              for (const entry of allEntries) {
-                const docId = entry.documentId;
-                const isPublished = !!entry.publishedAt;
-                const isModified = entry.updatedAt !== entry.createdAt;
-                if (!uniqueEntries.has(docId)) {
-                  uniqueEntries.set(docId, entry);
-                } else {
-                  const existing = uniqueEntries.get(docId);
-                  const existingIsPublished = !!existing.publishedAt;
-                  const existingIsModified = existing.updatedAt !== existing.createdAt;
-                  // Priority: published > modified draft > draft
-                  if (isPublished && !existingIsPublished) {
-                    uniqueEntries.set(docId, entry);
-                  } else if (!isPublished && !existingIsPublished && isModified && !existingIsModified) {
-                    uniqueEntries.set(docId, entry);
-                  }
-                }
-              }
+          const searchable = this.getSearchableFields(strapi.contentTypes[ct]);
+          const numberSearchable = this.getNumberFields(strapi.contentTypes[ct]);
 
-              entries = Array.from(uniqueEntries.values());
-              strapi.log.info(`Found ${allEntries.length} total entries, ${entries.length} unique entries after deduplication`);
+          if (parsedFilters._q) {
+            strapi.log.info(`Applying search query: ${parsedFilters._q} for fields: ${JSON.stringify([...searchable, ...numberSearchable])}`);
+            const orConditions = [];
 
-              // Apply filters
-              if (parsedFilters && Object.keys(parsedFilters).length > 0) {
-                strapi.log.info('Applying filters:', parsedFilters);
-                entries = this.applyClientSideFilters(entries, parsedFilters);
-                strapi.log.info(`After filtering: ${entries.length} entries`);
-              }
-            } else {
-              // Fallback for older Strapi versions
-              entries = await strapi.entityService.findMany(ct, {
-                populate: '*',
-                filters: parsedFilters,
-              });
-              strapi.log.info(`EntityService found ${entries?.length || 0} entries`);
+            if (searchable.length > 0) {
+              orConditions.push(
+                ...searchable.map((field) => ({
+                  [field]: { $containsi: parsedFilters._q }
+                }))
+              );
             }
+
+            if (numberSearchable.length > 0 && !isNaN(parsedFilters._q)) {
+              orConditions.push(
+                ...numberSearchable.map((field) => ({
+                  [field]: { $eq: Number(parsedFilters._q) }
+                }))
+              );
+            }
+
+            if (orConditions.length > 0) {
+              filters = {
+                ...filters,
+                $and: [
+                  ...(filters?.$and || []),
+                  { $or: orConditions }
+                ]
+              };
+            }
+          }
+          strapi.log.info(`Parsed query filters: ${JSON.stringify(filters)}`)
+          try {
+            entries = await strapi.documents(ct).findMany({
+              filters: { ...filters},
+              populate: '*',
+            });
+            strapi.log.info(`EntityService found ${entries?.length || 0} entries`);
           } catch (error) {
             strapi.log.error(`Failed to query entries:`, error);
           }
@@ -134,11 +114,37 @@ module.exports = ({ strapi }) => ({
     return exportData;
   },
 
+  getSearchableFields(contentTypeSchema) {
+    const searchable = [];
+
+    for (const [fieldName, field] of Object.entries(contentTypeSchema.attributes)) {
+      if (["string", "text", "richtext", "email", "uid", "enumeration"].includes(field.type) && fieldName !== 'locale') {
+        searchable.push(fieldName);
+      }
+    }
+
+    return searchable;
+  },
+
+  getNumberFields(contentTypeSchema) {
+    const numberFields = [];
+
+    for (const [fieldName, field] of Object.entries(contentTypeSchema.attributes)) {
+      if (["number", "integer", "biginteger", "float", "decimal"].includes(field.type)) {
+        numberFields.push(fieldName);
+      }
+    }
+
+    numberFields.push('id');
+
+    return numberFields;
+  },
+
   parseFilters(filters) {
     const parsed = {};
     for (const [key, value] of Object.entries(filters)) {
       // Skip pagination and sorting params
-      if (['page', 'pageSize', 'sort', 'locale', 'format', 'contentType', 'selectedIds'].includes(key)) {
+      if (['page', 'pageSize', 'sort', 'locale', 'format', 'contentType', '_q'].includes(key)) {
         continue;
       }
 
@@ -170,62 +176,6 @@ module.exports = ({ strapi }) => ({
     }
 
     return parsed;
-  },
-
-  applyClientSideFilters(entries, filters) {
-    if (!filters || Object.keys(filters).length === 0) {
-      return entries;
-    }
-
-    const filtered = entries.filter(entry => {
-      // Handle structured filters
-      if (filters.filters && filters.filters.$and) {
-        for (const condition of filters.filters.$and) {
-          for (const [field, criteria] of Object.entries(condition)) {
-            if (typeof criteria === 'object' && criteria.$contains) {
-              // Handle $contains filter
-              if (entry[field]) {
-                const fieldValue = String(entry[field]).toLowerCase();
-                const searchValue = String(criteria.$contains).toLowerCase();
-                if (!fieldValue.includes(searchValue)) {
-                  return false;
-                }
-              } else {
-                return false; // Field doesn't exist, exclude entry
-              }
-            } else {
-              // Handle exact match
-              if (entry[field] !== criteria) {
-                return false;
-              }
-            }
-          }
-        }
-      }
-      // Handle other filter formats
-      for (const [key, value] of Object.entries(filters)) {
-        if (key === 'filters') continue; // Already handled above
-
-        // Handle simple search (global search)
-        if (key === '_q' || key === 'search') {
-          // Global search across main fields
-          const searchFields = ['shortName', 'name', 'title'];
-          const searchValue = String(value).toLowerCase();
-          const found = searchFields.some(field => {
-            if (entry[field]) {
-              return String(entry[field]).toLowerCase().includes(searchValue);
-            }
-            return false;
-          });
-          if (!found) {
-            return false;
-          }
-        }
-      }
-      return true;
-    });
-
-    return filtered;
   },
 
   convertToExcel(data) {

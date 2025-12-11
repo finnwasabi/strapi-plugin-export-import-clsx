@@ -21,7 +21,7 @@ const ExportImportButtons = (props) => {
     const filters = {};
     
     for (const [key, value] of urlParams.entries()) {
-      if (key.startsWith('filters[') || key === 'sort' || key === 'page' || key === 'pageSize' || key === 'locale') {
+      if (key.startsWith('filters[') || key === 'sort' || key === 'page' || key === 'pageSize' || key === 'locale' || key === '_q') {
         filters[key] = value;
       }
     }
@@ -41,21 +41,54 @@ const ExportImportButtons = (props) => {
     if (props.selection && props.selection.length > 0) {
       return props.selection;
     }
-    
-    // Try to get from global state or context
+    const selectedIds = [];
+    let field = '';
+    const getHeaderKey = i => {
+      const el = document.querySelector(`thead th:nth-child(${i}) button, thead th:nth-child(${i}) span`);
+      if (!el) return '';
+      const parts = el.textContent.trim().split(/\s+/);
+      return parts.pop(); // last word
+    };
+
     try {
-      // Check if there's a selection in the page context
-      const checkboxes = document.querySelectorAll('input[type="checkbox"]:checked');
-      const selectedIds = [];
-      checkboxes.forEach(checkbox => {
-        const value = checkbox.value;
-        if (value && value !== 'on' && value !== 'all') {
-          selectedIds.push(value);
+      const rows = document.querySelectorAll('tbody tr');
+      const allowedFields = [
+        'id', 'name', 'title', 'tickerCode',
+        'fullName', 'email', 'businessEmail',
+        'telephone', 'mobile'
+      ];
+
+      let foundIndex = null;
+
+      for (let i = 1; i <= 10; i++) {
+        const headerBtn = getHeaderKey(i);
+        if (headerBtn !== '' && allowedFields.includes(headerBtn)) {
+          field = headerBtn;
+          foundIndex = i;
+          break;
+        }
+      }
+
+      if (!foundIndex) {
+        console.warn('No valid header column found');
+        return [[], ''];
+      }
+
+      // gather values for selected rows
+      rows.forEach(row => {
+        const checkbox = row.querySelector('td:nth-child(1) button[role="checkbox"]');
+        if (checkbox?.getAttribute('aria-checked') === 'true') {
+          const cellSpan = row.querySelector(`td:nth-child(${foundIndex}) span`);
+          const text = cellSpan?.textContent.trim();
+          if (text) selectedIds.push(text);
         }
       });
-      return selectedIds;
-    } catch (error) {
-      return [];
+
+      return [selectedIds, field];
+
+    } catch (e) {
+      console.error(e);
+      return [[], ''];
     }
   };
 
@@ -69,8 +102,8 @@ const ExportImportButtons = (props) => {
     setIsExporting(true);
     try {
       const filters = getCurrentFilters();
-      const selectedEntries = getSelectedEntries();
-      
+      const [selectedEntries, selectedField] = getSelectedEntries();
+
       const queryParams = new URLSearchParams({
         format: 'excel',
         contentType: contentType,
@@ -80,10 +113,11 @@ const ExportImportButtons = (props) => {
       // Add selected IDs if any
       if (selectedEntries.length > 0) {
         queryParams.set('selectedIds', JSON.stringify(selectedEntries));
+        queryParams.set('selectedField', selectedField);
       }
 
       const response = await fetch(`/export-import-clsx/export?${queryParams}`);
-      
+
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -180,7 +214,7 @@ const ExportImportButtons = (props) => {
     }
   };
 
-  const selectedEntries = getSelectedEntries();
+  const [selectedEntries, selectedField] = getSelectedEntries();
   const exportButtonText = isExporting 
     ? 'Exporting...' 
     : selectedEntries.length > 0 

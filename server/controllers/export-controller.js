@@ -1,7 +1,7 @@
 module.exports = ({ strapi }) => ({
   async export(ctx) {
     try {
-      const { format = 'excel', contentType, selectedIds, ...filters } = ctx.query;
+      const { format = 'excel', contentType, selectedIds, selectedField, ...filters } = ctx.query;
       const exportService = strapi.plugin('export-import-clsx').service('export-service');
       
       // Parse selectedIds if provided
@@ -15,7 +15,7 @@ module.exports = ({ strapi }) => ({
       }
       
       if (format === 'excel') {
-        const buffer = await exportService.exportData('excel', contentType, filters, parsedSelectedIds);
+        const buffer = await exportService.exportData('excel', contentType, filters, parsedSelectedIds, selectedField);
         
         const filename = parsedSelectedIds.length > 0 
           ? `${contentType?.replace('api::', '') || 'strapi'}-selected-${parsedSelectedIds.length}-${new Date().toISOString().split('T')[0]}.xlsx`
