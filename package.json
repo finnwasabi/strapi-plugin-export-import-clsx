@@ -1,6 +1,6 @@
 {
-  "name": "@nkhang1902/strapi-plugin-export-import-clsx",
-  "version": "1.0.4",
+  "name": "@tunghtml/strapi-plugin-export-import-clsx",
+  "version": "1.1.0",
   "description": "A powerful Strapi plugin for exporting and importing data with Excel support and advanced filtering",
   "main": "./strapi-server.js",
   "scripts": {
@@ -21,8 +21,8 @@
     "strapi-plugin"
   ],
   "author": {
-    "name": "finnwasabi",
-    "email": "finnwasabi@example.com"
+    "name": "FinnWasabi",
+    "email": "oohlala5533@gmail.com"
   },
   "license": "MIT",
   "repository": {

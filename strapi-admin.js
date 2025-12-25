@@ -1,8 +1,8 @@
-import React from 'react';
-import pluginPkg from './package.json';
-import pluginId from './admin/src/pluginId';
-import Initializer from './admin/src/components/Initializer';
-import ExportImportButtons from './admin/src/components/ExportImportButtons';
+import React from "react";
+import pluginPkg from "./package.json";
+import pluginId from "./admin/src/pluginId";
+import Initializer from "./admin/src/components/Initializer";
+import ExportImportButtons from "./admin/src/components/ExportImportButtons";
 
 const name = pluginPkg.strapi.name;
 
@@ -23,38 +23,41 @@ export default {
     try {
       // Method 1: Direct injection
       if (app.injectContentManagerComponent) {
-        app.injectContentManagerComponent('listView', 'actions', {
-          name: 'export-import-buttons',
+        app.injectContentManagerComponent("listView", "actions", {
+          name: "export-import-buttons",
           Component: ExportImportButtons,
         });
       }
       // Method 2: Plugin-based injection
       else if (app.getPlugin) {
-        const contentManager = app.getPlugin('content-manager');
+        const contentManager = app.getPlugin("content-manager");
         if (contentManager && contentManager.injectComponent) {
-          contentManager.injectComponent('listView', 'actions', {
-            name: 'export-import-buttons',
+          contentManager.injectComponent("listView", "actions", {
+            name: "export-import-buttons",
             Component: ExportImportButtons,
           });
         }
       }
       // Method 3: Global injection
       else if (app.addComponent) {
-        app.addComponent('content-manager.listView.actions', ExportImportButtons);
+        app.addComponent(
+          "content-manager.listView.actions",
+          ExportImportButtons
+        );
       }
     } catch (error) {
-      console.warn('Failed to inject export-import buttons:', error);
-      
+      console.warn("Failed to inject export-import buttons:", error);
+
       // Fallback: Add as menu item if injection fails
       app.addMenuLink({
         to: `/plugins/${pluginId}`,
-        icon: () => React.createElement('span', null, '📊'),
+        icon: () => React.createElement("span", null, "📊"),
         intlLabel: {
           id: `${pluginId}.plugin.name`,
-          defaultMessage: 'Export Import',
+          defaultMessage: "Export Import",
         },
         Component: async () => {
-          const component = await import('./admin/src/pages/App');
+          const component = await import("./admin/src/pages/App");
           return component;
         },
         permissions: [],
