@@ -1,13 +1,7 @@
 const XLSX = require("xlsx");
 
 module.exports = ({ strapi }) => ({
-  async exportData(
-    format = "json",
-    contentType = null,
-    rawFilters = {},
-    selectedIds = [],
-    selectedField = null
-  ) {
+  async exportData(format = "json", contentType = null, rawFilters = {}) {
     // Normalize content type - handle both content-manager and event-manager formats
     if (contentType && !contentType.startsWith("api::")) {
       // If it's already in api:: format from event-manager, use as is
@@ -52,87 +46,67 @@ module.exports = ({ strapi }) => ({
           `Exporting ${ct} with raw filters: ${JSON.stringify(rawFilters)}`
         );
         strapi.log.info(`Parsed filters: ${JSON.stringify(parsedFilters)}`);
-        strapi.log.info(`Selected IDs: ${JSON.stringify(selectedIds)}`);
 
         let entries = [];
         let filters = parsedFilters.filters;
 
-        // If specific IDs are selected, export only those
-        if (selectedIds && selectedIds.length > 0) {
+        // Export all entries with filters
+        const searchable = this.getSearchableFields(strapi.contentTypes[ct]);
+        const numberSearchable = this.getNumberFields(strapi.contentTypes[ct]);
+
+        if (parsedFilters._q) {
           strapi.log.info(
-            `Exporting selected: ${JSON.stringify(selectedIds)}, field: ${selectedField}`
+            `Applying search query: ${
+              parsedFilters._q
+            } for fields: ${JSON.stringify([
+              ...searchable,
+              ...numberSearchable,
+            ])}`
           );
-          if (
-            selectedField === "id" ||
-            (strapi.contentTypes[ct].attributes[selectedField] &&
-              ["number", "integer", "biginteger", "float", "decimal"].includes(
-                strapi.contentTypes[ct].attributes[selectedField].type
-              ))
-          ) {
-            selectedIds = selectedIds.map((id) => Number(id));
-          }
-          try {
-            entries = await strapi.documents(ct).findMany({
-              filters: {
-                [selectedField]: { $in: selectedIds },
-              },
-              populate: "*",
-            });
-          } catch (error) {
-            strapi.log.error(`Failed to export selected entries:`, error);
-          }
-        } else {
-          // Export all entries with filters
-          const searchable = this.getSearchableFields(strapi.contentTypes[ct]);
-          const numberSearchable = this.getNumberFields(
-            strapi.contentTypes[ct]
-          );
+          const orConditions = [];
 
-          if (parsedFilters._q) {
-            strapi.log.info(
-              `Applying search query: ${parsedFilters._q} for fields: ${JSON.stringify([...searchable, ...numberSearchable])}`
+          if (searchable.length > 0) {
+            orConditions.push(
+              ...searchable.map((field) => ({
+                [field]: { $containsi: parsedFilters._q },
+              }))
             );
-            const orConditions = [];
-
-            if (searchable.length > 0) {
-              orConditions.push(
-                ...searchable.map((field) => ({
-                  [field]: { $containsi: parsedFilters._q },
-                }))
-              );
-            }
-
-            if (numberSearchable.length > 0 && !isNaN(parsedFilters._q)) {
-              orConditions.push(
-                ...numberSearchable.map((field) => ({
-                  [field]: { $eq: Number(parsedFilters._q) },
-                }))
-              );
-            }
-
-            if (orConditions.length > 0) {
-              filters = {
-                ...filters,
-                $and: [...(filters?.$and || []), { $or: orConditions }],
-              };
-            }
           }
-          strapi.log.info(`Parsed query filters: ${JSON.stringify(filters)}`);
-          try {
-            entries = await strapi.documents(ct).findMany({
-              filters: { ...filters },
-              populate: "*",
-            });
-            strapi.log.info(
-              `EntityService found ${entries?.length || 0} entries`
+
+          if (numberSearchable.length > 0 && !isNaN(parsedFilters._q)) {
+            orConditions.push(
+              ...numberSearchable.map((field) => ({
+                [field]: { $eq: Number(parsedFilters._q) },
+              }))
             );
-          } catch (error) {
-            strapi.log.error(`Failed to query entries:`, error);
+          }
+
+          if (orConditions.length > 0) {
+            filters = {
+              ...filters,
+              $and: [...(filters?.$and || []), { $or: orConditions }],
+            };
           }
         }
 
+        strapi.log.info(`Parsed query filters: ${JSON.stringify(filters)}`);
+
+        try {
+          entries = await strapi.documents(ct).findMany({
+            filters: { ...filters },
+            populate: "*",
+          });
+          strapi.log.info(
+            `EntityService found ${entries?.length || 0} entries`
+          );
+        } catch (error) {
+          strapi.log.error(`Failed to query entries:`, error);
+        }
+
         strapi.log.info(
-          `Final result: ${entries?.length || 0} entries for ${ct} (total found: ${entries?.length || 0})`
+          `Final result: ${
+            entries?.length || 0
+          } entries for ${ct} (total found: ${entries?.length || 0})`
         );
 
         if (entries && entries.length > 0) {

@@ -93,80 +93,6 @@ const ExportImportButtons = (props) => {
     return filters;
   };
 
-  // Get selected entries from props
-  const getSelectedEntries = () => {
-    // Try to get selected entries from various possible props
-    if (props.selectedEntries && props.selectedEntries.length > 0) {
-      return props.selectedEntries;
-    }
-    if (props.selected && props.selected.length > 0) {
-      return props.selected;
-    }
-    if (props.selection && props.selection.length > 0) {
-      return props.selection;
-    }
-    const selectedIds = [];
-    let field = "";
-    const getHeaderKey = (i) => {
-      const el = document.querySelector(
-        `thead th:nth-child(${i}) button, thead th:nth-child(${i}) span`
-      );
-      if (!el) return "";
-      const parts = el.textContent.trim().split(/\s+/);
-      return parts.pop(); // last word
-    };
-
-    try {
-      const rows = document.querySelectorAll("tbody tr");
-      const allowedFields = [
-        "id",
-        "name",
-        "title",
-        "tickerCode",
-        "fullName",
-        "email",
-        "businessEmail",
-        "telephone",
-        "mobile",
-      ];
-
-      let foundIndex = null;
-
-      for (let i = 1; i <= 10; i++) {
-        const headerBtn = getHeaderKey(i);
-        if (headerBtn !== "" && allowedFields.includes(headerBtn)) {
-          field = headerBtn;
-          foundIndex = i;
-          break;
-        }
-      }
-
-      if (!foundIndex) {
-        console.warn("No valid header column found");
-        return [[], ""];
-      }
-
-      // gather values for selected rows
-      rows.forEach((row) => {
-        const checkbox = row.querySelector(
-          'td:nth-child(1) button[role="checkbox"]'
-        );
-        if (checkbox?.getAttribute("aria-checked") === "true") {
-          const cellSpan = row.querySelector(
-            `td:nth-child(${foundIndex}) span`
-          );
-          const text = cellSpan?.textContent.trim();
-          if (text) selectedIds.push(text);
-        }
-      });
-
-      return [selectedIds, field];
-    } catch (e) {
-      console.error(e);
-      return [[], ""];
-    }
-  };
-
   const handleExport = async () => {
     const contentType = getContentType();
     if (!contentType) {
@@ -180,8 +106,7 @@ const ExportImportButtons = (props) => {
     setIsExporting(true);
     try {
       const filters = getCurrentFilters();
-      const eventFilter = getEventFilter(); // Back to sync
-      const [selectedEntries, selectedField] = getSelectedEntries();
+      const eventFilter = getEventFilter();
 
       const queryParams = new URLSearchParams({
         format: "excel",
@@ -197,12 +122,6 @@ const ExportImportButtons = (props) => {
         );
       }
 
-      // Add selected IDs if any
-      if (selectedEntries.length > 0) {
-        queryParams.set("selectedIds", JSON.stringify(selectedEntries));
-        queryParams.set("selectedField", selectedField);
-      }
-
       const response = await fetch(`/export-import-clsx/export?${queryParams}`);
 
       if (response.ok) {
@@ -211,11 +130,9 @@ const ExportImportButtons = (props) => {
         const a = document.createElement("a");
         a.href = url;
 
-        // Set filename based on selection
-        const filename =
-          selectedEntries.length > 0
-            ? `${contentType.replace("api::", "")}-selected-${selectedEntries.length}-${new Date().toISOString().split("T")[0]}.xlsx`
-            : `${contentType.replace("api::", "")}-export-${new Date().toISOString().split("T")[0]}.xlsx`;
+        const filename = `${contentType.replace("api::", "")}-export-${
+          new Date().toISOString().split("T")[0]
+        }.xlsx`;
 
         a.download = filename;
         document.body.appendChild(a);
@@ -225,10 +142,7 @@ const ExportImportButtons = (props) => {
 
         toggleNotification({
           type: "success",
-          message:
-            selectedEntries.length > 0
-              ? `Successfully exported ${selectedEntries.length} selected entries`
-              : "Successfully exported data",
+          message: "Successfully exported data",
         });
       } else {
         throw new Error("Export failed");
@@ -323,19 +237,12 @@ const ExportImportButtons = (props) => {
   // Create ref for file input
   const fileInputRef = useRef(null);
 
-  const [selectedEntries, selectedField] = getSelectedEntries();
-  const exportButtonText =
-    selectedEntries.length > 0
-      ? `Export (${selectedEntries.length})`
-      : "Export";
-
   return (
     <div
       style={{
         display: "flex",
         gap: "8px",
         alignItems: "center",
-        marginRight: "16px",
         order: -1,
       }}
     >
@@ -346,7 +253,7 @@ const ExportImportButtons = (props) => {
         variant="secondary"
         size="S"
       >
-        {exportButtonText}
+        Export
       </Button>
 
       <input
